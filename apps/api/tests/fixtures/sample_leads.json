@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Studio Odonto BH",
+    "category": "clinica odontologica",
+    "address": "Belo Horizonte, MG",
+    "website": null,
+    "phone": "(31) 3333-4444"
+  },
+  {
+    "name": "Restaurante Sabor Caseiro",
+    "category": "restaurante",
+    "address": "Sao Paulo, SP",
+    "website": "http://saborcaseiro.com",
+    "phone": "(11) 5555-6666"
+  }
+]
