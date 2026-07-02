@@ -1,0 +1,9 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "leadhunter-ai"
+version = "0.1.0"
+description = "Sistema multiagente de prospecção B2B"
+requires-python = ">=3.11"
