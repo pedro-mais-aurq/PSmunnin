@@ -1,0 +1,17 @@
+version: '3.8'
+# Override para desenvolvimento local
+services:
+  api:
+    volumes:
+      - ../../apps/api/src:/app/src
+    command: uvicorn leadhunter_api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    volumes:
+      - ../../apps/worker/src:/app/src
+    command: celery -A leadhunter_worker.celery_app.app worker --loglevel=info
+
+  web:
+    volumes:
+      - ../../apps/web/src:/app/src
+    command: npm run dev
