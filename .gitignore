@@ -1,88 +1,176 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# =========================================================
+# PS Munnin - .gitignore
+# Backend: Python / FastAPI
+# Frontend: React / CRACO
+# =========================================================
 
-# IDE and editors
-.idea/
-.vscode/
 
-# Dependencies
-node_modules/
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# =========================================================
+# Environment files - NEVER COMMIT REAL SECRETS
+# =========================================================
+.env
+*.env
+.env.*
+*.env.*
 
-# Testing
-/coverage
+backend/.env
+backend/*.env
+backend/.env.*
 
-# Next.js
-/.next/
-/out/
-next-env.d.ts
-*.tsbuildinfo
+frontend/.env
+frontend/*.env
+frontend/.env.*
 
-# Production builds
-/build
+# Keep safe examples
+!.env.example
+!backend/.env.example
+!frontend/.env.example
+
+
+# =========================================================
+# Python / FastAPI
+# =========================================================
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+*.pyo
+*.pyd
+*.so
+
+.Python
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+backend/.venv/
+backend/venv/
+backend/env/
+
+# Python packaging/build
+build/
 dist/
-dist
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
-# Environment files (comprehensive coverage)
+# Test / coverage / type checking
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
 
-*token.json*
-*credentials.json*
 
-# Logs and debug files
+# =========================================================
+# Node / React / CRACO
+# =========================================================
+node_modules/
+frontend/node_modules/
+
+# React build output
+frontend/build/
+frontend/.cache/
+
+# Package manager cache/logs
+.npm/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.yarnrc.yml
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
-dump.rdb
+pnpm-debug.log*
 
-# System files
+# Keep lockfiles
+!package-lock.json
+!frontend/package-lock.json
+
+
+# =========================================================
+# Logs
+# =========================================================
+logs/
+*.log
+
+
+# =========================================================
+# Mongo / local database dumps
+# =========================================================
+dump/
+dumps/
+*.bson
+*.archive
+*.mongodb
+
+
+# =========================================================
+# OS files
+# =========================================================
 .DS_Store
-*.pem
+.AppleDouble
+.LSOverride
 
-# Python
-__pycache__/
-*pyc*
-venv/
-.venv/
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
 
-# Development tools
-chainlit.md
-.chainlit
-.ipynb_checkpoints/
-.ac
+$RECYCLE.BIN/
 
-# Deployment
-.vercel
 
-# Data and databases
-agenthub/agents/youtube/db
+# =========================================================
+# Editor / IDE
+# =========================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
 
-# Archive files and large assets
-**/*.zip
-**/*.tar.gz
-**/*.tar
-**/*.tgz
-*.pack
-*.deb
-*.dylib
+# Optional: keep shared VS Code settings if you create them later
+!.vscode/extensions.json
+!.vscode/settings.example.json
 
-# Build caches
+
+# =========================================================
+# Local temporary files
+# =========================================================
+tmp/
+temp/
 .cache/
+.cache-loader/
 
-memory/test_credentials.md
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
 
-# Mobile development
-android-sdk/
-.env
-.env.*
-*.env
-credentials.json
-*.key
-.credentials
+
+# =========================================================
+# Deployment artifacts
+# =========================================================
+.vercel/
+.netlify/
+.render/
+
+
+# =========================================================
+# Misc
+# =========================================================
+*.zip
+*.rar
+*.7z
