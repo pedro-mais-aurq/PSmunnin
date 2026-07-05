@@ -1,0 +1,26 @@
+{
+  "summary": "PS Munnin MVP smoke test — backend endpoints and full frontend flow validated end-to-end against public URL. All 8 backend cases passed (health, create/list/get/delete searches, background pipeline, leads sorting, email/whatsapp message generation, invalid region -> failed status). Frontend flow passed: nova pesquisa -> pipeline running -> Concluída with leads -> lead detail (name/score/issues) -> generate message -> whatsapp toggle changes body -> copy button visible -> dashboard lists searches.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "GET /api/health -> 200 {status: ok}",
+    "POST /api/searches (restaurante/Florianópolis, limit 8) -> pending; pipeline finished in ~5s with 7 leads, status=done",
+    "GET /api/searches lists searches (3 present, latest first)",
+    "GET /api/searches/{id} returns {search, leads}; leads sorted by score desc (verified True)",
+    "GET /api/leads/{id} returns lead (name+score)",
+    "GET /api/leads/{id}/message?channel=email -> subject+body containing lead name",
+    "GET /api/leads/{id}/message?channel=whatsapp -> body differs, channel=whatsapp",
+    "Invalid region CidadeQueNaoExisteXYZ123 -> search.status=failed, error='Região não encontrada: ...'",
+    "DELETE /api/searches/{id} -> {ok:true}; subsequent GET returns 404",
+    "Frontend: /nova-pesquisa form (nicho/regiao/limit slider/submit) submits and redirects to /pesquisas/:id",
+    "Frontend: SearchDetail shows psm-search-status transitioning from 'Analisando…' to 'Concluída' with 9 psm-lead-card items",
+    "Frontend: Lead detail page renders psm-lead-detail-name ('Armazém da Nina'), psm-lead-detail-score (92), psm-lead-detail-issues visible",
+    "Frontend: message generation (email) shows body 580 chars containing lead name; whatsapp toggle shows different body (409 chars); psm-lead-message-copy visible",
+    "Frontend: Dashboard renders 4 psm-search-list-item cards including a Falhou state showing the error message"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "Empty-state dashboard was not exercised because DB already contained prior searches, but SearchDetail failure card is rendered correctly (Falhou + error text). psm-form-limit is a range slider (not text input); scripts must set value via input event dispatch. Pipeline was significantly faster than expected (~5s) — likely due to Overpass responding quickly."
+}
