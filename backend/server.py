@@ -11,48 +11,90 @@ Fluxo:
 from __future__ import annotations
 
 import asyncio
+import difflib
+import json
 import logging
 import os
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Optional
-
-import difflib
 import re
 import unicodedata
-from fastapi import HTTPException
-
+import uuid
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
 
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
-ROOT_DIR = Path(__file__).parent
+ROOT_DIR = Path(__file__).resolve().parent
 load_dotenv(ROOT_DIR / ".env")
 
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ["DB_NAME"]]
+MONGO_URL = os.getenv("MONGO_URL", "").strip()
+DB_NAME = os.getenv("DB_NAME", "").strip()
 
-app = FastAPI(title="PS Munnin API", version="0.1.0")
+if not MONGO_URL:
+    raise RuntimeError(
+        "A variável de ambiente MONGO_URL não está configurada."
+    )
+
+if not DB_NAME:
+    raise RuntimeError(
+        "A variável de ambiente DB_NAME não está configurada."
+    )
+
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=10_000,
+)
+
+db = client[DB_NAME]
+
+app = FastAPI(
+    title="PS Munnin API",
+    description="API do MVP de prospecção automatizada PS Munnin.",
+    version="0.2.0",
+)
+
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
 logger = logging.getLogger("ps-munnin")
 
-USER_AGENT = "PSMunninMVP/1.0 (contact: dev@psmunnin.local)"
+USER_AGENT = os.getenv(
+    "OSM_USER_AGENT",
+    "PSMunninMVP/1.0",
+).strip()
+
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+BACKGROUND_TASKS: dict[
+    asyncio.Task[None],
+    str,
+] = {}
+
+STALE_MONITOR_TASK: Optional[
+    asyncio.Task[None]
+] = None
+
+SEARCH_HEARTBEAT_SECONDS = 30
+STALE_SEARCH_SECONDS = 120
+
+INTERRUPTED_SEARCH_ERROR = (
+    "A pesquisa foi interrompida pela reinicialização "
+    "do serviço. Inicie uma nova pesquisa."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -828,14 +870,6 @@ NICHO_CATALOG = {
 }
 
 
-def _normalize(text: str) -> str:
-    """Lowercase + strip accents for keyword matching."""
-    import unicodedata
-
-    nfkd = unicodedata.normalize("NFKD", text.lower())
-    return "".join(c for c in nfkd if not unicodedata.combining(c)).strip()
-
-
 def _normalize_text(value: str) -> str:
     value = value.strip().lower()
 
@@ -875,6 +909,7 @@ def _singularize_phrase(value: str) -> str:
     return " ".join(_singularize_token(token) for token in tokens)
 
 
+@lru_cache(maxsize=1)
 def _build_nicho_index() -> dict[str, dict]:
     index = {}
 
@@ -943,58 +978,120 @@ def resolve_nicho(nicho: str) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
+SearchStatus = Literal[
+    "pending",
+    "running",
+    "done",
+    "failed",
+]
+
+LeadPriority = Literal[
+    "low",
+    "medium",
+    "high",
+]
+
+ContactChannel = Literal[
+    "email",
+    "whatsapp",
+    "generic",
+]
+
+
 class SearchCreate(BaseModel):
     nicho: str = Field(min_length=2, max_length=80)
     regiao: str = Field(min_length=2, max_length=120)
     limit: int = Field(default=25, ge=1, le=60)
 
+    @field_validator("nicho", "regiao")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        normalized = value.strip()
+
+        if len(normalized) < 2:
+            raise ValueError(
+                "O campo deve possuir pelo menos dois caracteres."
+            )
+
+        return normalized
+
 
 class Lead(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
     search_id: str
     name: str
+
     category: Optional[str] = None
     address: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None
+
     lat: Optional[float] = None
     lon: Optional[float] = None
-    # analysis
+
     has_website: bool = False
     website_reachable: Optional[bool] = None
     https: Optional[bool] = None
     response_ms: Optional[int] = None
+
     has_title: Optional[bool] = None
     has_meta_description: Optional[bool] = None
     has_viewport: Optional[bool] = None
     has_favicon: Optional[bool] = None
+
     status_code: Optional[int] = None
-    issues: List[str] = Field(default_factory=list)
+
+    issues: list[str] = Field(default_factory=list)
+
     score: int = 0
-    priority: str = "low"  # low | medium | high
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    priority: LeadPriority = "low"
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Search(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
     nicho: str
     regiao: str
-    status: str = "pending"  # pending | running | done | failed
+
+    status: SearchStatus = "pending"
+
     total_found: int = 0
     total_analyzed: int = 0
+
     error: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SearchDetail(BaseModel):
+    search: Search
+    leads: list[Lead]
 
 
 class ContactMessage(BaseModel):
     subject: str
     body: str
-    channel: str  # email | whatsapp | generic
+    channel: ContactChannel
 
 
 # ---------------------------------------------------------------------------
@@ -1009,10 +1106,35 @@ def _serialize(model: BaseModel) -> dict:
 
 
 def _deserialize_search(doc: dict) -> Search:
-    doc = {k: v for k, v in doc.items() if k != "_id"}
-    for k in ("created_at", "updated_at"):
-        if isinstance(doc.get(k), str):
-            doc[k] = datetime.fromisoformat(doc[k])
+    doc = {
+        key: value
+        for key, value in doc.items()
+        if key != "_id"
+    }
+
+    for key in (
+        "created_at",
+        "updated_at",
+    ):
+        if isinstance(
+            doc.get(key),
+            str,
+        ):
+            doc[key] = datetime.fromisoformat(
+                doc[key]
+            )
+
+    if (
+        doc.get("error") is not None
+        and not isinstance(
+            doc["error"],
+            str,
+        )
+    ):
+        doc["error"] = _format_error_detail(
+            doc["error"]
+        )
+
     return Search(**doc)
 
 
@@ -1021,6 +1143,164 @@ def _deserialize_lead(doc: dict) -> Lead:
     if isinstance(doc.get("created_at"), str):
         doc["created_at"] = datetime.fromisoformat(doc["created_at"])
     return Lead(**doc)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _format_error_detail(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+
+    if isinstance(detail, dict):
+        message = str(
+            detail.get("message")
+            or "Não foi possível concluir a pesquisa."
+        )
+
+        supported_niches = detail.get("supported_niches")
+
+        if isinstance(supported_niches, list):
+            niches_text = ", ".join(
+                str(item)
+                for item in supported_niches
+            )
+
+            return (
+                f"{message} "
+                f"Nichos suportados: {niches_text}."
+            )
+
+        return json.dumps(
+            detail,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    return str(detail)
+
+
+async def _update_search(
+    search_id: str,
+    **fields: Any,
+) -> None:
+    fields["updated_at"] = _utc_now_iso()
+
+    await db.searches.update_one(
+        {"id": search_id},
+        {"$set": fields},
+    )
+
+
+def _forget_background_task(
+    task: asyncio.Task[None],
+) -> None:
+    BACKGROUND_TASKS.pop(
+        task,
+        None,
+    )
+
+
+async def _search_heartbeat(
+    search_id: str,
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=SEARCH_HEARTBEAT_SECONDS,
+            )
+
+        except asyncio.TimeoutError:
+            try:
+                await _update_search(
+                    search_id
+                )
+
+            except Exception:
+                logger.exception(
+                    "Não foi possível atualizar o heartbeat: "
+                    "search=%s",
+                    search_id,
+                )
+
+
+async def _fail_stale_searches() -> int:
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(
+            seconds=STALE_SEARCH_SECONDS
+        )
+    ).isoformat()
+
+    result = await db.searches.update_many(
+        {
+            "status": {
+                "$in": [
+                    "pending",
+                    "running",
+                ]
+            },
+            "updated_at": {
+                "$lt": cutoff,
+            },
+        },
+        {
+            "$set": {
+                "status": "failed",
+                "error": INTERRUPTED_SEARCH_ERROR,
+                "updated_at": _utc_now_iso(),
+            }
+        },
+    )
+
+    return result.modified_count
+
+
+async def _monitor_stale_searches() -> None:
+    while True:
+        try:
+            await asyncio.sleep(
+                SEARCH_HEARTBEAT_SECONDS
+            )
+
+            recovered_count = (
+                await _fail_stale_searches()
+            )
+
+            if recovered_count:
+                logger.warning(
+                    "%d pesquisa(s) obsoleta(s) "
+                    "foram marcadas como failed.",
+                    recovered_count,
+                )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "Falha ao verificar pesquisas obsoletas."
+            )
+
+
+def _parse_cors_origins() -> list[str]:
+    raw_value = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000",
+    )
+
+    origins: list[str] = []
+
+    for item in raw_value.split(","):
+        origin = item.strip().rstrip("/")
+
+        if origin and origin not in origins:
+            origins.append(origin)
+
+    return origins
 
 
 # ---------------------------------------------------------------------------
@@ -1033,6 +1313,7 @@ async def geocode_region(regiao: str) -> Optional[dict]:
         "format": "json",
         "limit": 1,
         "addressdetails": 1,
+        "countrycodes": "br",
     }
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "pt-BR"}
     async with httpx.AsyncClient(timeout=20) as cli:
@@ -1066,7 +1347,11 @@ def _build_overpass_query(filters: list[tuple[str, str]], bbox: list[str], limit
     return f"[out:json][timeout:30];\n(\n{body}\n);\nout tags center {limit};"
 
 
-async def fetch_businesses(nicho: str, regiao: str, limit: int) -> tuple[list[dict], Optional[str]]:
+async def fetch_businesses(
+    nicho: str,
+    regiao: str,
+    limit: int,
+) -> tuple[list[dict], str]:
     """Return (list of raw business dicts, resolved region display name)."""
     region_info = await geocode_region(regiao)
     if not region_info:
@@ -1088,9 +1373,18 @@ async def fetch_businesses(nicho: str, regiao: str, limit: int) -> tuple[list[di
     for el in elements:
         tags = el.get("tags") or {}
         name = tags.get("name")
-        if not name or name in seen_names:
+        if not name:
             continue
-        seen_names.add(name)
+
+        normalized_name = _normalize_text(name)
+
+        if not normalized_name:
+            continue
+
+        if normalized_name in seen_names:
+            continue
+
+        seen_names.add(normalized_name)
         lat = el.get("lat") or (el.get("center") or {}).get("lat")
         lon = el.get("lon") or (el.get("center") or {}).get("lon")
         # Build address from tags
@@ -1257,89 +1551,169 @@ def calculate_score(lead: Lead) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
-async def run_pipeline(search: Search, limit: int) -> None:
-    """Fetch businesses, analyze, store leads, update search status."""
-    try:
-        await db.searches.update_one(
-            {"id": search.id},
-            {"$set": {"status": "running", "updated_at": datetime.now(timezone.utc).isoformat()}},
+async def run_pipeline(
+    search: Search,
+    limit: int,
+) -> None:
+    heartbeat_stop = asyncio.Event()
+
+    heartbeat_task = asyncio.create_task(
+        _search_heartbeat(
+            search.id,
+            heartbeat_stop,
         )
-        businesses, _ = await fetch_businesses(search.nicho, search.regiao, limit)
-        await db.searches.update_one(
-            {"id": search.id}, {"$set": {"total_found": len(businesses)}}
+    )
+
+    try:
+        await _update_search(
+            search.id,
+            status="running",
+            error=None,
         )
 
-        # analyze in parallel batches
-        async def _process(b: dict) -> Lead:
+        businesses, _ = await fetch_businesses(
+            search.nicho,
+            search.regiao,
+            limit,
+        )
+
+        await _update_search(
+            search.id,
+            total_found=len(businesses),
+        )
+
+        async def process_business(
+            business: dict,
+        ) -> Lead:
             lead = Lead(
                 search_id=search.id,
-                name=b["name"],
-                category=b.get("category"),
-                address=b.get("address"),
-                phone=b.get("phone"),
-                website=b.get("website"),
-                lat=b.get("lat"),
-                lon=b.get("lon"),
-                has_website=bool(b.get("website")),
+                name=business["name"],
+                category=business.get("category"),
+                address=business.get("address"),
+                phone=business.get("phone"),
+                website=business.get("website"),
+                lat=business.get("lat"),
+                lon=business.get("lon"),
+                has_website=bool(
+                    business.get("website")
+                ),
             )
-            if lead.has_website:
-                analysis = await analyze_website(lead.website)
-                for k, v in analysis.items():
-                    setattr(lead, k, v)
+
+            if lead.has_website and lead.website:
+                analysis = await analyze_website(
+                    lead.website
+                )
+
+                for key, value in analysis.items():
+                    setattr(lead, key, value)
             else:
-                lead.issues = ["Sem site cadastrado"]
+                lead.issues = [
+                    "Sem site cadastrado"
+                ]
+
             score, priority = calculate_score(lead)
+
             lead.score = score
             lead.priority = priority
+
             return lead
 
-        # limit concurrency to be a good citizen
-        sem = asyncio.Semaphore(6)
+        semaphore = asyncio.Semaphore(6)
 
-        async def _bounded(b: dict) -> Lead:
-            async with sem:
-                return await _process(b)
+        async def bounded_process(
+            business: dict,
+        ) -> Lead:
+            async with semaphore:
+                return await process_business(
+                    business
+                )
 
-        leads = await asyncio.gather(*[_bounded(b) for b in businesses])
-        # sort by score desc
-        leads.sort(key=lambda x: x.score, reverse=True)
+        leads = await asyncio.gather(
+            *[
+                bounded_process(business)
+                for business in businesses
+            ]
+        )
+
+        leads.sort(
+            key=lambda item: item.score,
+            reverse=True,
+        )
+
+        await db.leads.delete_many(
+            {"search_id": search.id}
+        )
 
         if leads:
-            await db.leads.insert_many([_serialize(lead) for lead in leads])
+            await db.leads.insert_many(
+                [
+                    _serialize(lead)
+                    for lead in leads
+                ]
+            )
 
-        await db.searches.update_one(
-            {"id": search.id},
-            {
-                "$set": {
-                    "status": "done",
-                    "total_analyzed": len(leads),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
-            },
+        await _update_search(
+            search.id,
+            status="done",
+            total_analyzed=len(leads),
+            error=None,
         )
+
         logger.info(
-            "Pipeline done: search=%s found=%d analyzed=%d",
+            "Pipeline concluído: search=%s found=%d analyzed=%d",
             search.id,
             len(businesses),
             len(leads),
         )
+
     except HTTPException as exc:
-        await db.searches.update_one(
-            {"id": search.id},
-            {"$set": {"status": "failed", "error": exc.detail}},
+        error_message = _format_error_detail(
+            exc.detail
         )
+
+        logger.warning(
+            "Pipeline rejeitado: search=%s error=%s",
+            search.id,
+            error_message,
+        )
+
+        await _update_search(
+            search.id,
+            status="failed",
+            error=error_message,
+        )
+
     except Exception as exc:
-        logger.exception("Pipeline failed")
-        await db.searches.update_one(
-            {"id": search.id},
-            {"$set": {"status": "failed", "error": str(exc)}},
+        logger.exception(
+            "Falha inesperada no pipeline: search=%s",
+            search.id,
+        )
+
+        await _update_search(
+            search.id,
+            status="failed",
+            error=(
+                "Não foi possível concluir a pesquisa. "
+                f"Erro interno: {exc.__class__.__name__}."
+            ),
+        )
+
+    finally:
+        heartbeat_stop.set()
+
+        await asyncio.gather(
+            heartbeat_task,
+            return_exceptions=True,
         )
 
 
 # ---------------------------------------------------------------------------
 # Contact message template
 # ---------------------------------------------------------------------------
-def build_message(lead: Lead, channel: str = "email") -> ContactMessage:
+def build_message(
+    lead: Lead,
+    channel: ContactChannel = "email",
+) -> ContactMessage:
     name = lead.name
     issues_txt = ""
     if lead.issues:
@@ -1379,86 +1753,337 @@ def build_message(lead: Lead, channel: str = "email") -> ContactMessage:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 @api_router.get("/")
 async def root():
-    return {"service": "PS Munnin API", "status": "ok"}
+    return {
+        "service": "PS Munnin API",
+        "status": "ok",
+    }
 
 
 @api_router.get("/health")
 async def health():
     try:
         await db.command("ping")
-        return {"status": "ok"}
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+
+        return {
+            "status": "ok",
+        }
+
+    except Exception:
+        logger.exception(
+            "Falha no health check do MongoDB."
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Banco de dados indisponível.",
+        )
 
 
-@api_router.post("/searches", response_model=Search)
-async def create_search(payload: SearchCreate):
-    search = Search(nicho=payload.nicho.strip(), regiao=payload.regiao.strip())
-    await db.searches.insert_one(_serialize(search))
-    # Run pipeline in background so the request returns fast
-    asyncio.create_task(run_pipeline(search, payload.limit))
+@api_router.post(
+    "/searches",
+    response_model=Search,
+    status_code=202,
+)
+async def create_search(
+    payload: SearchCreate,
+):
+    search = Search(
+        nicho=payload.nicho,
+        regiao=payload.regiao,
+    )
+
+    await db.searches.insert_one(
+        _serialize(search)
+    )
+
+    task = asyncio.create_task(
+        run_pipeline(
+            search,
+            payload.limit,
+        )
+    )
+
+    BACKGROUND_TASKS[task] = search.id
+
+    task.add_done_callback(
+        _forget_background_task
+    )
+
     return search
 
 
-@api_router.get("/searches", response_model=List[Search])
+@api_router.get(
+    "/searches",
+    response_model=list[Search],
+)
 async def list_searches():
-    docs = await db.searches.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
-    return [_deserialize_search(d) for d in docs]
+    docs = (
+        await db.searches
+        .find(
+            {},
+            {"_id": 0},
+        )
+        .sort("created_at", -1)
+        .to_list(200)
+    )
+
+    return [
+        _deserialize_search(document)
+        for document in docs
+    ]
 
 
-@api_router.get("/searches/{search_id}")
-async def get_search(search_id: str):
-    doc = await db.searches.find_one({"id": search_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Pesquisa não encontrada")
-    search = _deserialize_search(doc)
-    lead_docs = await db.leads.find({"search_id": search_id}, {"_id": 0}).sort("score", -1).to_list(500)
-    leads = [_deserialize_lead(d) for d in lead_docs]
-    return {"search": search, "leads": leads}
+@api_router.get(
+    "/searches/{search_id}",
+    response_model=SearchDetail,
+)
+async def get_search(
+    search_id: str,
+):
+    document = await db.searches.find_one(
+        {"id": search_id},
+        {"_id": 0},
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Pesquisa não encontrada.",
+        )
+
+    search = _deserialize_search(document)
+
+    lead_documents = (
+        await db.leads
+        .find(
+            {"search_id": search_id},
+            {"_id": 0},
+        )
+        .sort("score", -1)
+        .to_list(500)
+    )
+
+    leads = [
+        _deserialize_lead(lead_document)
+        for lead_document in lead_documents
+    ]
+
+    return SearchDetail(
+        search=search,
+        leads=leads,
+    )
 
 
-@api_router.delete("/searches/{search_id}")
-async def delete_search(search_id: str):
-    res = await db.searches.delete_one({"id": search_id})
-    await db.leads.delete_many({"search_id": search_id})
-    if res.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Pesquisa não encontrada")
-    return {"ok": True}
+@api_router.delete(
+    "/searches/{search_id}",
+)
+async def delete_search(
+    search_id: str,
+):
+    result = await db.searches.delete_one(
+        {"id": search_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Pesquisa não encontrada.",
+        )
+
+    await db.leads.delete_many(
+        {"search_id": search_id}
+    )
+
+    return {
+        "ok": True,
+    }
 
 
-@api_router.get("/leads/{lead_id}", response_model=Lead)
-async def get_lead(lead_id: str):
-    doc = await db.leads.find_one({"id": lead_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Lead não encontrado")
-    return _deserialize_lead(doc)
+@api_router.get(
+    "/leads/{lead_id}",
+    response_model=Lead,
+)
+async def get_lead(
+    lead_id: str,
+):
+    document = await db.leads.find_one(
+        {"id": lead_id},
+        {"_id": 0},
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Lead não encontrado.",
+        )
+
+    return _deserialize_lead(document)
 
 
-@api_router.get("/leads/{lead_id}/message", response_model=ContactMessage)
-async def generate_message(lead_id: str, channel: str = "email"):
-    doc = await db.leads.find_one({"id": lead_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Lead não encontrado")
-    lead = _deserialize_lead(doc)
-    return build_message(lead, channel=channel)
+@api_router.get(
+    "/leads/{lead_id}/message",
+    response_model=ContactMessage,
+)
+async def generate_message(
+    lead_id: str,
+    channel: ContactChannel = "email",
+):
+    document = await db.leads.find_one(
+        {"id": lead_id},
+        {"_id": 0},
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Lead não encontrado.",
+        )
+
+    lead = _deserialize_lead(document)
+
+    return build_message(
+        lead,
+        channel=channel,
+    )
 
 
 # ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
+
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_parse_cors_origins(),
+    allow_credentials=False,
+    allow_methods=[
+        "GET",
+        "POST",
+        "DELETE",
+        "OPTIONS",
+    ],
+    allow_headers=[
+        "Content-Type",
+    ],
 )
 
 
+@app.on_event("startup")
+async def startup_application() -> None:
+    global STALE_MONITOR_TASK
+
+    await db.command("ping")
+
+    stale_count = (
+        await _fail_stale_searches()
+    )
+
+    if stale_count:
+        logger.warning(
+            "%d pesquisa(s) obsoleta(s) "
+            "foram marcadas como failed.",
+            stale_count,
+        )
+
+    STALE_MONITOR_TASK = asyncio.create_task(
+        _monitor_stale_searches()
+    )
+
+    await db.searches.create_index(
+        "id",
+        unique=True,
+    )
+
+    await db.searches.create_index(
+        "created_at",
+    )
+
+    await db.leads.create_index(
+        "id",
+        unique=True,
+    )
+
+    await db.leads.create_index(
+        "search_id",
+    )
+
+    await db.leads.create_index(
+        [
+            ("search_id", 1),
+            ("score", -1),
+        ]
+    )
+
+    logger.info(
+        "Backend iniciado e índices MongoDB verificados."
+    )
+
+
 @app.on_event("shutdown")
-async def shutdown_db_client():
+async def shutdown_application() -> None:
+    global STALE_MONITOR_TASK
+
+    if STALE_MONITOR_TASK:
+        STALE_MONITOR_TASK.cancel()
+
+        await asyncio.gather(
+            STALE_MONITOR_TASK,
+            return_exceptions=True,
+        )
+
+        STALE_MONITOR_TASK = None
+
+    active_items = list(
+        BACKGROUND_TASKS.items()
+    )
+
+    active_search_ids = [
+        search_id
+        for _, search_id in active_items
+    ]
+
+    for task, _ in active_items:
+        task.cancel()
+
+    if active_items:
+        await asyncio.gather(
+            *[
+                task
+                for task, _ in active_items
+            ],
+            return_exceptions=True,
+        )
+
+    if active_search_ids:
+        await db.searches.update_many(
+            {
+                "id": {
+                    "$in": active_search_ids,
+                },
+                "status": {
+                    "$in": [
+                        "pending",
+                        "running",
+                    ]
+                },
+            },
+            {
+                "$set": {
+                    "status": "failed",
+                    "error": INTERRUPTED_SEARCH_ERROR,
+                    "updated_at": _utc_now_iso(),
+                }
+            },
+        )
+
+    BACKGROUND_TASKS.clear()
+
     client.close()
+
+    logger.info(
+        "Backend encerrado."
+    )

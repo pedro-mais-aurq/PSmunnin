@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - correcao
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -12,7 +16,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: github-pages
   cancel-in-progress: false
 
 jobs:
@@ -21,28 +25,76 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve deployment variables
+        shell: bash
+        env:
+          CONFIGURED_API_URL: ${{ vars.NEXT_PUBLIC_API_URL || secrets.NEXT_PUBLIC_API_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CONFIGURED_API_URL}" ]; then
+            echo "::error::Configure NEXT_PUBLIC_API_URL em Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          REPOSITORY_NAME="${GITHUB_REPOSITORY#*/}"
+
+          if [[ "${REPOSITORY_NAME}" == *.github.io ]]; then
+            BASE_PATH=""
+          else
+            BASE_PATH="/${REPOSITORY_NAME}"
+          fi
+
+          echo "NEXT_PUBLIC_API_URL=${CONFIGURED_API_URL%/}" >> "${GITHUB_ENV}"
+          echo "NEXT_PUBLIC_BASE_PATH=${BASE_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install --legacy-peer-deps
+        run: npm ci
 
-      - name: Build frontend
+      - name: Generate types and type-check
         working-directory: frontend
-        env:
-          CI: false
-          REACT_APP_BACKEND_URL: ${{ secrets.REACT_APP_BACKEND_URL }}
+        run: npm run type-check
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build static frontend
+        working-directory: frontend
         run: npm run build
 
+      - name: Validate static output
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f out/index.html
+          test -d out/_next
+
+          if [ ! -f out/404.html ]; then
+            cp out/index.html out/404.html
+          fi
+
+          touch out/.nojekyll
+
       - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
-          path: frontend/build
+          path: frontend/out
 
   deploy:
     runs-on: ubuntu-latest
@@ -55,4 +107,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

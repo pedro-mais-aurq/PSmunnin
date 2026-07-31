@@ -1,176 +1,263 @@
-# =========================================================
-# PS Munnin - .gitignore
-# Backend: Python / FastAPI
-# Frontend: React / CRACO
-# =========================================================
+# PS Munnin
 
+MVP de prospecção automatizada para identificar empresas locais com baixa
+maturidade digital.
 
-# =========================================================
-# Environment files - NEVER COMMIT REAL SECRETS
-# =========================================================
-.env
-*.env
-.env.*
-*.env.*
+## Arquitetura
 
-backend/.env
-backend/*.env
-backend/.env.*
+```text
+GitHub Pages
+    ↓
+Next.js estático
+    ↓
+FastAPI no Render
+    ↓
+MongoDB
+    ↓
+Nominatim + Overpass + análise de websites
+```
 
-frontend/.env
-frontend/*.env
-frontend/.env.*
+## Estrutura
 
-# Keep safe examples
-!.env.example
-!backend/.env.example
-!frontend/.env.example
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── deploy-frontend.yml
+├── backend/
+│   ├── server.py
+│   ├── requirements.txt
+│   ├── requirements.local.txt
+│   ├── pytest.ini
+│   ├── .python-version
+│   ├── .env.example
+│   └── tests/
+├── docs/
+│   └── PRD.md
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── next.config.mjs
+│   ├── eslint.config.mjs
+│   ├── tsconfig.json
+│   ├── .env.example
+│   └── SECURITY_NOTES.md
+├── .gitignore
+└── README.md
+```
 
+## Requisitos
 
-# =========================================================
-# Python / FastAPI
-# =========================================================
-__pycache__/
-*/__pycache__/
-*.py[cod]
-*$py.class
+* Python 3.12.
+* Node.js 20 ou superior.
+* MongoDB local ou MongoDB Atlas.
+* npm.
 
-*.pyo
-*.pyd
-*.so
+## Backend local
 
-.Python
-.python-version
+```bash
+cd backend
+python -m venv .venv
+```
 
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-backend/.venv/
-backend/venv/
-backend/env/
+PowerShell:
 
-# Python packaging/build
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
-# Test / coverage / type checking
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.mypy_cache/
-.pyre/
-.pytype/
-.ruff_cache/
+Linux ou macOS:
 
+```bash
+source .venv/bin/activate
+```
 
-# =========================================================
-# Node / React / CRACO
-# =========================================================
-node_modules/
-frontend/node_modules/
+Instalação:
 
-# React build output
-frontend/build/
-frontend/.cache/
+```bash
+pip install -r requirements.local.txt
+```
 
-# Package manager cache/logs
-.npm/
-.pnpm-store/
-.yarn/
-.yarn-cache/
-.yarnrc.yml
+Crie `backend/.env` a partir de `backend/.env.example`:
 
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+```env
+MONGO_URL=mongodb://localhost:27017
+DB_NAME=psmunnin
+CORS_ORIGINS=http://localhost:3000
+OSM_USER_AGENT=PSMunninMVP/1.0
+```
 
-# Keep lockfiles
-!package-lock.json
-!frontend/package-lock.json
+Inicie:
 
+```bash
+uvicorn server:app --reload --host 0.0.0.0 --port 8000
+```
 
-# =========================================================
-# Logs
-# =========================================================
-logs/
-*.log
+Health check:
 
+```text
+http://localhost:8000/api/health
+```
 
-# =========================================================
-# Mongo / local database dumps
-# =========================================================
-dump/
-dumps/
-*.bson
-*.archive
-*.mongodb
+Swagger:
 
+```text
+http://localhost:8000/docs
+```
 
-# =========================================================
-# OS files
-# =========================================================
-.DS_Store
-.AppleDouble
-.LSOverride
+## Frontend local
 
-Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
-Desktop.ini
+```bash
+cd frontend
+npm ci
+```
 
-$RECYCLE.BIN/
+Crie `frontend/.env.local` a partir de `frontend/.env.example`:
 
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_BASE_PATH=
+```
 
-# =========================================================
-# Editor / IDE
-# =========================================================
-.vscode/
-.idea/
-*.swp
-*.swo
-*.swn
+Inicie:
 
-# Optional: keep shared VS Code settings if you create them later
-!.vscode/extensions.json
-!.vscode/settings.example.json
+```bash
+npm run dev
+```
 
+Acesse:
 
-# =========================================================
-# Local temporary files
-# =========================================================
-tmp/
-temp/
-.cache/
-.cache-loader/
+```text
+http://localhost:3000
+```
 
-*.tmp
-*.temp
-*.bak
-*.backup
-*.old
+## Testes e validações
 
+Backend:
 
-# =========================================================
-# Deployment artifacts
-# =========================================================
-.vercel/
-.netlify/
-.render/
+```bash
+cd backend
+python -m compileall .
+pytest
+```
 
+Frontend:
 
-# =========================================================
-# Misc
-# =========================================================
-*.zip
-*.rar
-*.7z
+```bash
+cd frontend
+npm ci
+npm run type-check
+npm run lint
+npm run build
+```
+
+O comando `npm run type-check` executa primeiro `next typegen` para gerar os
+tipos internos do Next.js antes de executar o TypeScript.
+
+## Deploy do backend no Render
+
+Configure um Web Service com:
+
+```text
+Root Directory:
+backend
+
+Build Command:
+pip install -r requirements.txt
+
+Start Command:
+uvicorn server:app --host 0.0.0.0 --port $PORT
+
+Health Check Path:
+/api/health
+```
+
+Variáveis obrigatórias:
+
+```env
+MONGO_URL=<conexão real do MongoDB>
+DB_NAME=psmunnin
+CORS_ORIGINS=https://pedro-mais-aurq.github.io,http://localhost:3000
+OSM_USER_AGENT=PSMunninMVP/1.0
+```
+
+Não inclua `/PSmunnin` em `CORS_ORIGINS`.
+
+## Deploy do frontend no GitHub Pages
+
+O workflow é acionado por push na branch:
+
+```text
+correcao
+```
+
+Crie a variável de repositório:
+
+```text
+NEXT_PUBLIC_API_URL=https://ps-munnin.onrender.com
+```
+
+Caminho:
+
+```text
+Settings
+→ Secrets and variables
+→ Actions
+→ Variables
+```
+
+Em:
+
+```text
+Settings
+→ Pages
+→ Build and deployment
+```
+
+selecione:
+
+```text
+Source: GitHub Actions
+```
+
+O workflow gera e publica:
+
+```text
+frontend/out
+```
+
+O `basePath` é calculado automaticamente pelo workflow a partir do nome do
+repositório.
+
+## Fluxo da aplicação
+
+1. O formulário envia `POST /api/searches`.
+2. O backend retorna a pesquisa com status `pending`.
+3. O frontend consulta `GET /api/searches/{id}`.
+4. O status evolui para `running`.
+5. A conclusão retorna `done` e os leads.
+6. Erros retornam `failed` com mensagem legível.
+7. O operador seleciona um lead.
+8. O frontend consulta `/api/leads/{id}/message`.
+9. A mensagem é copiada manualmente.
+
+## Segurança do frontend
+
+Os advisories identificados pelo `npm audit` estão documentados em:
+
+```text
+frontend/SECURITY_NOTES.md
+```
+
+Não utilize `npm audit fix --force`.
+
+## Limitação do MVP
+
+O processamento assíncrono ainda ocorre dentro do processo FastAPI. Cada
+pesquisa ativa mantém um heartbeat no MongoDB. Durante um desligamento normal,
+somente as pesquisas pertencentes à instância encerrada são marcadas como
+`failed`. Após uma falha abrupta, um monitor marca como `failed` apenas pesquisas
+sem heartbeat recente. A adoção de uma fila externa pertence a uma etapa futura
+e não faz parte deste deploy.
