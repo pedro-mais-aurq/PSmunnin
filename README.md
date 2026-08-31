@@ -87,7 +87,7 @@ MONGO_URL=mongodb://localhost:27017
 DB_NAME=psmunnin
 CORS_ORIGINS=http://localhost:3000
 OSM_USER_AGENT=PSMunnin/0.2 (+https://github.com/pedro-mais-aurq/PSmunnin)
-OVERPASS_ENDPOINTS=https://overpass.private.coffee/api/interpreter,https://overpass-api.de/api/interpreter
+OVERPASS_ENDPOINTS=https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter
 ```
 
 Inicie:
@@ -196,11 +196,12 @@ Não inclua `/PSmunnin` em `CORS_ORIGINS`.
 
 ### Resiliência da coleta Overpass
 
-`OVERPASS_ENDPOINTS` é opcional. Quando ausente, utiliza Private Coffee e,
-em seguida, `overpass-api.de`, nesta ordem. Para sobrescrever o pool:
+`OVERPASS_ENDPOINTS` é opcional. Quando ausente, utiliza três infraestruturas
+independentes nesta ordem: Private Coffee → VK Maps (`maps.mail.ru`) →
+`overpass-api.de`. O último permanece como fallback final. Para sobrescrever o pool:
 
 ```env
-OVERPASS_ENDPOINTS=https://overpass.private.coffee/api/interpreter,https://overpass-api.de/api/interpreter
+OVERPASS_ENDPOINTS=https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter
 ```
 
 Separe as URLs por vírgula. Espaços e entradas vazias são removidos, e URLs
@@ -209,8 +210,15 @@ erro claro na inicialização; omita a variável para usar os defaults. As URLs
 devem ser HTTP(S), sem credenciais, query string ou fragmento. Não coloque
 tokens nessa variável. As variáveis de produção não são alteradas pelo patch.
 
-A coleta percorre o pool no máximo duas vezes: A → B → espera assíncrona de
-1,5 segundo → A → B. Timeouts HTTPX: conexão 10 s, leitura 45 s, escrita 10 s,
+Se o Render já tiver `OVERPASS_ENDPOINTS` com a lista anterior, ela continuará
+sobrescrevendo os defaults após o deploy. Atualize-a manualmente para os três
+endpoints acima, ou remova a variável para usar o novo padrão.
+
+A coleta faz **uma rodada completa por três infraestruturas independentes**,
+interrompendo no primeiro resultado válido. Há no máximo três chamadas no pool
+padrão, sem repetir servidores nem aguardar backoff. Isso reduz a latência em
+caso de indisponibilidade e amplia a diversidade de infraestrutura consultada.
+Timeouts HTTPX mantidos: conexão 10 s, leitura 45 s, escrita 10 s,
 pool 10 s. Esses valores são limites por fase de I/O, não um prazo total da pesquisa.
 Falhas de transporte, HTTP 429/5xx e respostas inválidas permitem failover.
 JSON deve conter uma lista `elements` de objetos e não pode indicar falha de
@@ -227,13 +235,59 @@ muda o contrato assíncrono: `POST /api/searches` continua retornando 202 e
 Para investigar no Render, filtre os logs por `search=<UUID>`. Cada tentativa
 Overpass registra `provider`, `endpoint`, `attempt`, `round` e `result`, além de
 status HTTP e tipo da exceção quando aplicáveis. A numeração de `attempt` é
-global na coleta (1 a 4 para o pool padrão). Tracebacks de transporte ficam nos
-logs; não são enviados ao frontend. O heartbeat permanece ativo durante a coleta.
+global na coleta (1 a 3 para o pool padrão), sempre com `round=1`. Se todos
+falharem, o log final termina com `attempt=3 round=1 result=unavailable`, o tipo
+do último erro e `failures=[...]`, contendo endpoint, tipo do erro e status HTTP
+quando existir para cada falha. Não inclui corpo arbitrário, headers ou tokens.
+O resumo e os tracebacks ficam apenas nos logs; a mensagem amigável do frontend
+não muda. O heartbeat permanece ativo durante a coleta.
 
 O polling continua apenas em `pending`/`running` e para em `done`/`failed`.
 Erros da própria consulta HTTP permitem nova tentativa somente para falhas de
 rede, timeout, HTTP 408/429/5xx; outros 4xx e falta de configuração não entram em
 repetição. `search.error` continua aparecendo na interface.
+
+### Diagnóstico manual de conectividade
+
+No Render Shell, com a raiz do serviço em `backend/`, execute:
+
+```bash
+python -m scripts.check_overpass
+```
+
+Se estiver na raiz do repositório local:
+
+```bash
+cd backend
+python -m scripts.check_overpass
+```
+
+O script consulta cada endpoint individualmente, mesmo que o primeiro funcione,
+uma única vez, usando uma query de no máximo um elemento OSM. Usa a mesma
+configuração de endpoints, User-Agent e timeouts da aplicação, centralizada em
+`backend/overpass_config.py`. Lê `backend/.env` sem sobrescrever variáveis do
+ambiente. Não importa o pipeline nem exige `MONGO_URL`/`DB_NAME`; não lê nem
+modifica banco de dados. Imprime endpoint, status, resultado e tempo aproximado,
+sem corpo da resposta, headers ou mensagens brutas de exceções.
+
+O código de saída é 0 se todos retornarem JSON válido e 1 se qualquer endpoint
+falhar. `python -m scripts.check_overpass --help` mostra as instruções sem fazer
+requisições. A execução sem `--help` faz chamadas reais: use somente sob demanda,
+nunca como parte do CI ou como um monitor de alta frequência.
+
+### CI de backend
+
+O workflow `.github/workflows/backend-tests.yml` executa em pushes para `correcao`
+com mudanças em `backend/**` ou no próprio workflow, e em pull requests que
+alterem esses mesmos caminhos. Usa Python 3.12, instala
+`backend/requirements.local.txt` e executa `pytest -q` em `backend/`.
+
+Falhas dos testes interrompem o job. A suíte usa HTTP simulado; o diagnóstico
+manual nunca é executado no workflow. A integração opcional com MongoDB fica
+desativada em CI. O workflow cria uma verificação; para bloquear merges ou um
+deploy independente do Render, configure esse check como obrigatório nas regras
+do repositório e a política de deploy apropriada. O patch não altera essas regras.
+
 
 ## Deploy do frontend no GitHub Pages
 

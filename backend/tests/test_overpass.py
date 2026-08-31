@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import logging
 import os
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ server = importlib.import_module("server")
 
 SEARCH_ID = "2c7686cf-57c5-4dc6-ad10-ea3e25940a14"
 QUERY = '[out:json];node["amenity"="dentist"];out;'
-PRIMARY, BACKUP = server.DEFAULT_OVERPASS_ENDPOINTS
+PRIMARY, SECONDARY, BACKUP = server.DEFAULT_OVERPASS_ENDPOINTS
 VALID_DATA = {"elements": [{"type": "node", "tags": {"name": "Clínica Teste"}}]}
 
 
@@ -27,7 +28,7 @@ def overpass_http(monkeypatch):
     calls = []
     options = []
     sleep = AsyncMock()
-    monkeypatch.setattr(server, "OVERPASS_ENDPOINTS", (PRIMARY, BACKUP))
+    monkeypatch.setattr(server, "OVERPASS_ENDPOINTS", (PRIMARY, SECONDARY, BACKUP))
     monkeypatch.setattr(server.asyncio, "sleep", sleep)
 
     def install(handler):
@@ -85,7 +86,7 @@ def test_network_failure_fails_over(overpass_http, error_type, caplog):
     result = asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID))
 
     assert result == VALID_DATA
-    assert overpass_http.calls == [PRIMARY, BACKUP]
+    assert overpass_http.calls == [PRIMARY, SECONDARY]
     overpass_http.sleep.assert_not_awaited()
     assert SEARCH_ID in caplog.text
     assert f"error_type={error_type.__name__}" in caplog.text
@@ -101,7 +102,7 @@ def test_temporary_http_fails_over(overpass_http, status, caplog):
 
     overpass_http.install(handler)
     assert asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID)) == VALID_DATA
-    assert overpass_http.calls == [PRIMARY, BACKUP]
+    assert overpass_http.calls == [PRIMARY, SECONDARY]
     assert f"status={status}" in caplog.text
     overpass_http.sleep.assert_not_awaited()
 
@@ -120,7 +121,7 @@ def test_invalid_response_fails_over(overpass_http, response, caplog):
     overpass_http.install(lambda request: response if str(request.url) == PRIMARY
                           else httpx.Response(200, json=VALID_DATA))
     assert asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID)) == VALID_DATA
-    assert overpass_http.calls == [PRIMARY, BACKUP]
+    assert overpass_http.calls == [PRIMARY, SECONDARY]
     assert "result=invalid_response" in caplog.text
 
 
@@ -143,27 +144,84 @@ def test_all_endpoints_fail_with_controlled_503(overpass_http, failure, caplog):
     with pytest.raises(HTTPException) as caught:
         asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID))
 
-    assert overpass_http.calls == [PRIMARY, BACKUP, PRIMARY, BACKUP]
-    overpass_http.sleep.assert_awaited_once_with(1.5)
+    assert overpass_http.calls == [PRIMARY, SECONDARY, BACKUP]
+    overpass_http.sleep.assert_not_awaited()
     assert caught.value.status_code == 503
     assert caught.value.detail == server.OVERPASS_UNAVAILABLE_ERROR
     assert caught.value.__cause__ is not None
     assert "ConnectError" not in caught.value.detail
     assert "overpass" not in caught.value.detail.lower()
     assert "All Overpass endpoints failed" in caplog.text
-    assert "attempt=4 round=2" in caplog.text
+    assert "attempt=3 round=1" in caplog.text
 
 
-def test_second_round_succeeds_after_single_backoff(overpass_http):
+def test_first_two_fail_and_final_backup_succeeds(overpass_http):
     def handler(request):
-        if len(overpass_http.calls) < 3:
+        if str(request.url) == PRIMARY:
+            raise httpx.ReadTimeout("mock read timeout", request=request)
+        if str(request.url) == SECONDARY:
             return httpx.Response(503)
         return httpx.Response(200, json=VALID_DATA)
 
     overpass_http.install(handler)
     assert asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID)) == VALID_DATA
-    assert overpass_http.calls == [PRIMARY, BACKUP, PRIMARY]
-    overpass_http.sleep.assert_awaited_once_with(1.5)
+    assert overpass_http.calls == [PRIMARY, SECONDARY, BACKUP]
+    overpass_http.sleep.assert_not_awaited()
+
+
+def test_mixed_failures_are_aggregated_without_leaking_to_frontend(overpass_http, caplog):
+    def handler(request):
+        if str(request.url) == PRIMARY:
+            raise httpx.ReadTimeout("mock read timeout", request=request)
+        if str(request.url) == SECONDARY:
+            return httpx.Response(503, text="arbitrary-secret-body", headers={"X-Secret": "sensitive-header"})
+        raise httpx.ConnectError("mock connect error", request=request)
+
+    overpass_http.install(handler)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID))
+
+    assert overpass_http.calls == [PRIMARY, SECONDARY, BACKUP]
+    overpass_http.sleep.assert_not_awaited()
+    assert caught.value.status_code == 503
+    assert caught.value.detail == server.OVERPASS_UNAVAILABLE_ERROR
+    assert isinstance(caught.value.__cause__, httpx.ConnectError)
+    final = next(record for record in caplog.records if "All Overpass endpoints failed" in record.getMessage())
+    message = final.getMessage()
+    assert SEARCH_ID in message
+    assert "attempt=3 round=1" in message
+    assert "result=unavailable error_type=ConnectError" in message
+    assert json.loads(message.split(" failures=", 1)[1]) == [
+        {"endpoint": PRIMARY, "error_type": "ReadTimeout"},
+        {"endpoint": SECONDARY, "error_type": "HTTPStatusError", "status": 503},
+        {"endpoint": BACKUP, "error_type": "ConnectError"},
+    ]
+    for value in ["arbitrary-secret-body", "sensitive-header", "X-Secret"]:
+        assert value not in caplog.text
+    for value in [PRIMARY, SECONDARY, BACKUP, "ReadTimeout", "ConnectError", "failures"]:
+        assert value not in caught.value.detail
+
+
+def test_invalid_responses_are_included_in_aggregate(overpass_http, caplog):
+    overpass_http.install(lambda request: httpx.Response(200, json={"elements": {}}))
+    with pytest.raises(HTTPException):
+        asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID))
+    final = next(record for record in caplog.records if "All Overpass endpoints failed" in record.getMessage())
+    assert json.loads(final.getMessage().split(" failures=", 1)[1]) == [
+        {"endpoint": endpoint, "error_type": "TypeError", "status": 200}
+        for endpoint in (PRIMARY, SECONDARY, BACKUP)
+    ]
+
+
+def test_failed_pool_does_not_leak_previous_execution_failures(overpass_http, caplog):
+    overpass_http.install(lambda request: httpx.Response(503))
+    for search_id in [SEARCH_ID, "another-search"]:
+        with pytest.raises(HTTPException):
+            asyncio.run(server.query_overpass(QUERY, search_id=search_id))
+    finals = [record.getMessage() for record in caplog.records if "All Overpass endpoints failed" in record.getMessage()]
+    assert len(finals) == 2
+    assert all(len(json.loads(message.split(" failures=", 1)[1])) == 3 for message in finals)
+    assert "search=another-search" in finals[1]
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 302])
@@ -197,7 +255,13 @@ def test_cancellation_is_not_retried(overpass_http):
 
 
 def test_endpoint_configuration_defaults_and_trimming():
-    assert server._parse_overpass_endpoints(None) == (PRIMARY, BACKUP)
+    assert server.DEFAULT_OVERPASS_ENDPOINTS == (
+        "https://overpass.private.coffee/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+    )
+    assert server.OVERPASS_MAX_ROUNDS == 1
+    assert server._parse_overpass_endpoints(None) == (PRIMARY, SECONDARY, BACKUP)
     assert server._parse_overpass_endpoints(f" , {BACKUP},, {PRIMARY}, {BACKUP}, ") == (BACKUP, PRIMARY)
     assert server._parse_overpass_endpoints(BACKUP) == (BACKUP,)
 
@@ -219,7 +283,7 @@ def test_configured_pool_order_is_used(overpass_http, monkeypatch):
     overpass_http.install(lambda request: httpx.Response(503))
     with pytest.raises(HTTPException):
         asyncio.run(server.query_overpass(QUERY, search_id=SEARCH_ID))
-    assert overpass_http.calls == [BACKUP, BACKUP]
+    assert overpass_http.calls == [BACKUP]
 
 
 def test_fetch_businesses_propagates_search_id(monkeypatch):
@@ -307,19 +371,20 @@ def test_pipeline_passes_search_id_to_collection(monkeypatch):
     fetch.assert_awaited_once_with("dentistas", "Belo Horizonte", 10, search_id=SEARCH_ID)
 
 
-def test_real_heartbeat_runs_during_overpass_backoff(monkeypatch, overpass_http):
+def test_real_heartbeat_runs_while_waiting_for_overpass(monkeypatch, overpass_http):
     async def run():
         stop = asyncio.Event()
         update = AsyncMock(side_effect=lambda *args, **kwargs: stop.set())
         monkeypatch.setattr(server, "_update_search", update)
         monkeypatch.setattr(server, "SEARCH_HEARTBEAT_SECONDS", 0.001)
 
-        async def backoff(_seconds):
-            await asyncio.wait_for(stop.wait(), timeout=1.0)
+        async def handler(request):
+            if str(request.url) == PRIMARY:
+                await asyncio.wait_for(stop.wait(), timeout=1.0)
+                raise httpx.ReadTimeout("mock read timeout", request=request)
+            return httpx.Response(200, json={"elements": []})
 
-        overpass_http.sleep.side_effect = backoff
-        overpass_http.install(lambda request: httpx.Response(503) if len(overpass_http.calls) < 3
-                              else httpx.Response(200, json={"elements": []}))
+        overpass_http.install(handler)
         task = asyncio.create_task(server._search_heartbeat(SEARCH_ID, stop))
         try:
             await server.query_overpass(QUERY, search_id=SEARCH_ID)
@@ -327,5 +392,7 @@ def test_real_heartbeat_runs_during_overpass_backoff(monkeypatch, overpass_http)
             stop.set()
             await task
         update.assert_awaited_once_with(SEARCH_ID)
+        assert overpass_http.calls == [PRIMARY, SECONDARY]
+        overpass_http.sleep.assert_not_awaited()
 
     asyncio.run(run())

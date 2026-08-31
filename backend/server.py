@@ -28,9 +28,15 @@ from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+import overpass_config
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
+from overpass_config import (
+    OVERPASS_ENDPOINTS,
+    OVERPASS_TIMEOUT,
+    USER_AGENT,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
 
@@ -75,56 +81,10 @@ logging.basicConfig(
 
 logger = logging.getLogger("ps-munnin")
 
-USER_AGENT = os.getenv(
-    "OSM_USER_AGENT",
-    "PSMunninMVP/1.0",
-).strip()
-
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-DEFAULT_OVERPASS_ENDPOINTS = (
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
-)
-
-
-def _parse_overpass_endpoints(raw_value: str | None) -> tuple[str, ...]:
-    if raw_value is None:
-        return DEFAULT_OVERPASS_ENDPOINTS
-
-    endpoints = tuple(dict.fromkeys(
-        value.strip() for value in raw_value.split(",") if value.strip()
-    ))
-    if not endpoints:
-        raise RuntimeError("OVERPASS_ENDPOINTS deve conter ao menos uma URL.")
-
-    for endpoint in endpoints:
-        try:
-            parsed = urlsplit(endpoint)
-            valid = (
-                parsed.scheme in {"http", "https"}
-                and parsed.hostname
-                and parsed.port != 0
-                and not parsed.username
-                and not parsed.password
-                and not parsed.query
-                and not parsed.fragment
-                and not any(character.isspace() for character in endpoint)
-            )
-        except ValueError:
-            valid = False
-        if not valid:
-            # Do not echo configuration that may accidentally contain secrets.
-            raise RuntimeError(
-                "OVERPASS_ENDPOINTS aceita somente URLs HTTP(S) válidas, "
-                "sem credenciais, query string ou fragmento."
-            )
-    return endpoints
-
-
-OVERPASS_ENDPOINTS = _parse_overpass_endpoints(os.getenv("OVERPASS_ENDPOINTS"))
-OVERPASS_TIMEOUT = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
-OVERPASS_MAX_ROUNDS = 2
-OVERPASS_BACKOFF_SECONDS = 1.5
+DEFAULT_OVERPASS_ENDPOINTS = overpass_config.DEFAULT_OVERPASS_ENDPOINTS
+_parse_overpass_endpoints = overpass_config._parse_overpass_endpoints
+OVERPASS_MAX_ROUNDS = 1
 OVERPASS_UNAVAILABLE_ERROR = (
     "Os serviços de coleta de empresas estão temporariamente indisponíveis. "
     "Tente novamente mais tarde."
@@ -1810,9 +1770,10 @@ def _safe_overpass_error_excerpt(body: str) -> str:
 
 
 async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
-    """Try every endpoint before retrying the pool, with at most two rounds."""
+    """Try the configured pool once, stopping at the first valid response."""
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     last_error: Exception | None = None
+    failures: list[dict[str, str | int]] = []
     context = f"search={search_id} provider=overpass"
     async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT) as cli:
         for round_number in range(1, OVERPASS_MAX_ROUNDS + 1):
@@ -1829,6 +1790,7 @@ async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
                     # Includes connection/read/write/pool timeouts, network and
                     # remote protocol failures. Cancellation still propagates.
                     last_error = exc
+                    failures.append({"endpoint": endpoint, "error_type": type(exc).__name__})
                     logger.warning(
                         "Overpass network failure: %s result=network_failure error_type=%s",
                         context, type(exc).__name__, exc_info=True,
@@ -1841,6 +1803,7 @@ async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
                         f"Overpass temporary HTTP {status}",
                         request=response.request, response=response,
                     )
+                    failures.append({"endpoint": endpoint, "error_type": "HTTPStatusError", "status": status})
                     logger.warning(
                         "Overpass temporarily unavailable: %s result=temporary_http "
                         "status=%d error_type=HTTPStatusError", context, status,
@@ -1849,6 +1812,7 @@ async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
 
                 if not response.is_success:
                     # Rejected queries (and unexpected redirects) are not outages.
+                    failures.append({"endpoint": endpoint, "error_type": "HTTPStatusError", "status": status})
                     logger.error(
                         "Overpass request rejected: %s result=rejected status=%d "
                         "error_type=HTTPStatusError response_excerpt=%s",
@@ -1874,6 +1838,7 @@ async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
                         raise TypeError("Overpass elements must be objects")
                 except (ValueError, TypeError) as exc:
                     last_error = exc
+                    failures.append({"endpoint": endpoint, "error_type": type(exc).__name__, "status": status})
                     logger.warning(
                         "Overpass invalid response: %s result=invalid_response "
                         "status=%d error_type=%s", context, status, type(exc).__name__,
@@ -1887,16 +1852,9 @@ async def query_overpass(query: str, *, search_id: str) -> dict[str, Any]:
                 )
                 return data
 
-            if round_number < OVERPASS_MAX_ROUNDS:
-                logger.info(
-                    "Overpass retry: %s result=backoff delay_seconds=%s",
-                    context, OVERPASS_BACKOFF_SECONDS,
-                )
-                await asyncio.sleep(OVERPASS_BACKOFF_SECONDS)
-
     logger.error(
-        "All Overpass endpoints failed: %s result=unavailable error_type=%s",
-        context, type(last_error).__name__,
+        "All Overpass endpoints failed: %s result=unavailable error_type=%s failures=%s",
+        context, type(last_error).__name__, json.dumps(failures),
         exc_info=(type(last_error), last_error, last_error.__traceback__) if last_error else None,
     )
     raise HTTPException(status_code=503, detail=OVERPASS_UNAVAILABLE_ERROR) from last_error

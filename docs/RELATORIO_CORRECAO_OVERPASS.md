@@ -1,137 +1,144 @@
-# PSmunnin — correção de coleta Overpass e favicon
+# PSmunnin — Overpass com três endpoints e uma rodada
 
-Data: 31/08/2026. Base: arquivo `PSmunnin-correcao.zip` fornecido, correspondente
-à branch `correcao` e ao commit de origem
-`746253bb09cdc9d4f4d4cb24dc306bb4b56898a1` indicado no ZIP.
+Base: `PSmunnin-correcao (1).zip` fornecido nesta solicitação.
+Esta revisão atualiza a documentação do comportamento vigente. O trabalho foi
+feito no ZIP; não houve push, deploy nem alteração de variáveis do Render.
 
-As alterações foram aplicadas à cópia anexada. Não houve push ao GitHub, deploy,
-alteração de variáveis de produção ou uso de credenciais reais.
+## Arquivos modificados ou criados
 
-## Arquivos alterados
-
-| Arquivo | Ação | Alteração |
+| Arquivo | Ação | Mudança |
 | --- | --- | --- |
-| `backend/server.py` | Modificado | Pool, parsing de configuração, `query_overpass`, timeouts, failover, validação, logs, propagação de `search_id` e erros amigáveis. |
-| `backend/.env.example` | Modificado | `OVERPASS_ENDPOINTS` e User-Agent identificável. |
-| `backend/tests/test_overpass.py` | Criado | 52 casos executados, incluindo variações parametrizadas e regressões do pipeline. |
-| `frontend/src/lib/api.ts` | Modificado | Classificação dos erros HTTP e de transporte que permitem repetir o polling. |
-| `frontend/src/app/components/DashboardClient.tsx` | Modificado | Interrompe repetição em erros permanentes da consulta HTTP; mantém a lógica dos estados. |
-| `frontend/src/test/api.test.mjs` | Criado | 16 testes com `fetch` simulado, sem dependências novas. |
-| `frontend/src/app/layout.tsx` | Modificado | Remove configuração manual redundante de `icons`. |
-| `frontend/src/app/icon.svg` | Criado | Cópia exata do logo existente para a convenção do App Router. |
-| `frontend/public/favicon.ico` | Removido | Era XML/SVG com extensão ICO incorreta. |
-| `README.md` | Modificado | Configuração, comportamento, diagnóstico e comandos de testes. |
-| `docs/RELATORIO_CORRECAO_OVERPASS.md` | Criado | Este relatório. |
+| `backend/server.py` | Modificado | Uma rodada, sem backoff, e resumo seguro de todas as falhas no log final. |
+| `backend/overpass_config.py` | Criado | Endpoints, parsing, User-Agent e timeouts compartilhados com o diagnóstico, sem importar servidor/banco. |
+| `backend/.env.example` | Modificado | Lista dos três endpoints na ordem solicitada. |
+| `backend/tests/test_overpass.py` | Modificado | Testes adaptados à nova ordem, limite de chamadas e logs agregados. |
+| `backend/tests/test_alpha_01.py` | Modificado | Uma expectativa desatualizada: `search_lang="pt"` passa a `"pt-br"`, conforme o código existente. |
+| `backend/scripts/check_overpass.py` | Criado | Diagnóstico manual de conectividade por endpoint. |
+| `backend/tests/test_check_overpass.py` | Criado | Testes do diagnóstico usando HTTP simulado, inclusive execução sem módulo do servidor. |
+| `.github/workflows/backend-tests.yml` | Criado | CI Python 3.12, dependências locais de teste e `pytest -q`. |
+| `README.md` | Modificado | Pool atual, uma rodada, configuração do Render, logs, CI e comando manual. |
+| `docs/RELATORIO_CORRECAO_OVERPASS.md` | Modificado | Este relatório atualizado. |
 
-`frontend/public/psmunnin-logo.svg`, `package.json`, `package-lock.json`, os
-contratos da API e os testes antigos foram preservados.
+Nenhum arquivo foi removido nesta revisão. Todo o frontend, inclusive favicon,
+foi comparado byte a byte com o ZIP recebido e permanece idêntico.
 
-## Mudanças realizadas
+## Pool final
 
-- Pool padrão: Private Coffee → overpass-api.de. `OVERPASS_ENDPOINTS` substitui
-  a lista; parsing remove espaços, vazios e duplicatas. Variável ausente usa
-  os defaults; lista explicitamente vazia é erro de configuração. URLs não
-  podem conter credenciais, query string ou fragmento.
-- `query_overpass()` concentra a integração HTTP. São no máximo duas rodadas
-  pelo pool, com uma espera assíncrona de 1,5 segundo entre elas. Nenhum
-  `time.sleep()` foi introduzido.
-- Timeouts por fase: conexão 10 s, leitura 45 s, escrita 10 s e pool 10 s.
-  Eles não constituem um limite total de duração da pesquisa.
-- Falhas de transporte, HTTP 429/5xx e respostas inválidas acionam failover.
-  Outros 4xx interrompem a coleta com uma mensagem de rejeição identificável
-  (exceção controlada 502). Redirecionamentos inesperados também não são
-  percorridos silenciosamente.
-- JSON precisa ser um objeto com `elements` como lista de objetos. `elements=[]`
-  é válido. HTML, vazio, estruturas inesperadas e respostas com `remark`
-  indicando falha de execução são recusados, permitindo fallback.
-- Logs incluem o UUID da pesquisa, provedor, endpoint, tentativa global,
-  rodada e resultado. Status e tipo da exceção aparecem quando aplicáveis.
-  Trechos de respostas rejeitadas ficam limitados a cabeçalhos conhecidos de
-  diagnóstico, como `line 4: parse error`, sem copiar queries ou corpo arbitrário.
-- Ao esgotar o pool, a exceção 503 mantém a causa técnica para diagnóstico;
-  o pipeline persiste `failed` com a mensagem: “Os serviços de coleta de empresas
-  estão temporariamente indisponíveis. Tente novamente mais tarde.”
-- Erros inesperados também deixam de expor nomes de classes ao usuário.
-  O traceback continua nos logs. O fluxo `running → coleta → análise →
-  persistência → done/failed` e o encerramento do heartbeat foram preservados.
-- `total_found` só é atualizado após uma coleta válida. Testes verificam que
-  falha definitiva não inicia a análise nem altera leads, e que o heartbeat
-  continua durante o backoff.
-- Polling continua em `pending`/`running` e para em `done`/`failed`, exibindo
-  `search.error`. Repetições da requisição HTTP ficam limitadas a erros de rede,
-  timeout e HTTP 408/429/5xx. Erros permanentes, configuração ausente e erros
-  de programação fora da camada HTTP não geram repetição.
-- Favicon nativo em `src/app/icon.svg`, sem redesenho. O Next.js gera a metadata
-  e respeita o `basePath=/PSmunnin`.
+1. `https://overpass.private.coffee/api/interpreter`
+2. `https://maps.mail.ru/osm/tools/overpass/api/interpreter`
+3. `https://overpass-api.de/api/interpreter`
 
-Os códigos 502/503 acima descrevem exceções internas controladas da coleta,
-não uma mudança no contrato de polling: a criação continua com HTTP 202 e a
-consulta de uma pesquisa existente continua com HTTP 200 e seu estado persistido.
+`OVERPASS_MAX_ROUNDS = 1`: no pool padrão são no máximo três chamadas, cada
+endpoint uma vez, com retorno imediato no primeiro resultado válido. Foram
+removidos a constante e o trecho de backoff. A numeração é `attempt=1`, `2`, `3`,
+sempre com `round=1`. A diversidade adicional e a ausência de repetição reduzem
+a espera quando os serviços estão indisponíveis; não garantem que um provedor
+esteja acessível a partir do Render.
 
-## Validação executada
+Os timeouts HTTPX continuam: conexão 10 s, leitura 45 s, escrita 10 s e pool 10 s.
+O timeout interno da query de produção continua em 30 s. Limites por fase de I/O
+não equivalem a um prazo máximo absoluto da pesquisa.
 
-Ambiente: Python 3.12.13, Node.js 24.19.0, npm 11.9.0, Next.js 15.5.22.
-Dependências Python instaladas de `backend/requirements.local.txt` em ambiente
-virtual isolado. `npm install` executado em `frontend/`, sem alterar o lockfile.
+## Failover e observabilidade
 
-| Validação | Resultado real |
-| --- | --- |
-| `pytest -q -o addopts=''` em `backend/` | **124 passaram, 1 falhou, 1 ignorado**, 4 warnings. |
-| `pytest -q -o addopts='' tests/test_overpass.py` | **52 passaram**, 4 warnings preexistentes. |
-| `node --test src/test/api.test.mjs` em `frontend/` | **16 passaram**. |
-| `npm run check` em `frontend/` | **Passou**: tipos e ESLint. |
-| `npm run build` em `frontend/` | **Passou**: exportação estática, incluindo rota `/icon.svg`. |
-| Build com `NEXT_PUBLIC_BASE_PATH=/PSmunnin` | **Passou**, metadata aponta para `/PSmunnin/icon.svg?...`. |
-| Ruff em `server.py` e `tests/test_overpass.py` | **Passou**. |
-| Favicon exportado em servidor HTTP local | **HTTP 200**, MIME `image/svg+xml`. |
-| SVG do favicon | XML válido, autocontido e idêntico byte a byte ao logo existente. |
-| Comparação da função Brave e do heartbeat com o ZIP original | Implementações inalteradas. |
+São preservados o tratamento de `httpx.TransportError`, incluindo conexão,
+timeouts, leitura, escrita e protocolo remoto, e a propagação de cancelamento.
+HTTP 429/5xx, HTML, vazio, JSON inválido, `elements` inválido e `remark` de erro
+continuam permitindo fallback. HTTP 400/401/403/404/422 continuam encerrando a
+consulta com 502 controlado; não são mascarados como indisponibilidade.
 
-Todos os testes adicionados usam mocks; não consultam Overpass, Nominatim,
-Brave ou MongoDB reais.
+Ao esgotar o pool, o log mantém o contexto da última tentativa, a causa técnica
+e o campo `failures`, um JSON ordenado com somente endpoint, tipo de erro e
+status HTTP quando existir. Por exemplo, o cenário de teste obrigatório produz:
 
-## Falha preexistente reproduzida
-
-A suíte completa não está inteiramente verde. O teste
-`tests/test_alpha_01.py::test_brave_search_uses_brazilian_localization`, linha
-1351 do arquivo original, espera `search_lang="pt"`, mas a implementação
-original envia `"pt-br"`:
-
-```text
-assert request.url.params["search_lang"] == "pt"
-AssertionError: assert 'pt-br' == 'pt'
+```json
+[
+  {"endpoint": "https://overpass.private.coffee/api/interpreter", "error_type": "ReadTimeout"},
+  {"endpoint": "https://maps.mail.ru/osm/tools/overpass/api/interpreter", "error_type": "HTTPStatusError", "status": 503},
+  {"endpoint": "https://overpass-api.de/api/interpreter", "error_type": "ConnectError"}
+]
 ```
 
-Para confirmar a origem, o ZIP foi extraído novamente em um diretório separado,
-sem aplicar o patch, e esse teste foi executado isoladamente. Resultado:
-`1 failed, 4 warnings`. A função `search_web_for_website()` também foi comparada
-por AST com a original e permanece idêntica. Não foi modificada a Brave nem
-enfraquecido o teste para aparentar sucesso. Essa divergência exige uma decisão
-separada, conforme o escopo solicitado.
+O log final mantém `search=<UUID>`, `attempt=3`, `round=1` e
+`result=unavailable`. O resumo não contém corpo de resposta, headers ou tokens,
+e não é enviado ao frontend. A mensagem persistida continua exatamente:
 
-O teste ignorado é `test_mongodb_connection_smoke`: exige
-`RUN_MONGODB_INTEGRATION=1` e uma instância MongoDB configurada explicitamente.
-Os quatro warnings Python são deprecações de `FastAPI.on_event`, presentes na
-versão original. Não foram suprimidos. O npm também informa um aviso de
-configuração `http-proxy` do ambiente; ele não impediu tipos, lint ou build.
+> Os serviços de coleta de empresas estão temporariamente indisponíveis. Tente novamente mais tarde.
 
-## Limitações e preservações
+O AST das 67 funções/classes fora da consulta e do parser movido foi comparado
+com a base e permaneceu igual. Isso inclui pipeline, heartbeat, Nominatim,
+scoring, detecção de sites, Brave, rotas e modelos da API. A mudança no teste
+antigo da Brave alinha uma asserção ao valor já utilizado; não altera a integração
+nem exclui, ignora ou enfraquece a verificação de localização brasileira.
 
-- O navegador disponibilizado no ambiente bloqueou a abertura do endereço local
-  com `ERR_BLOCKED_BY_CLIENT`. Por isso, não se afirma validação visual em browser
-  nem teste completo da interface em execução. A verificação do favicon foi
-  feita sobre o HTML exportado, o SVG e a resposta HTTP local. O encerramento do
-  polling foi revisado no código; os testes de frontend validam a camada HTTP.
-- Não houve teste de disponibilidade real das instâncias públicas nem execução
-  completa em Render/MongoDB. Os testes reproduzem as falhas por HTTP simulado.
-- `M_ID` não foi encontrado no código-fonte fornecido. Não foi criado workaround.
-  Sua origem não foi confirmada; pode estar em bundle, runtime ou extensão.
-- Nominatim não foi tratado como a causa principal. Sua chamada foi preservada;
-  apenas recebeu logs de contexto na etapa de coleta.
-- Não foram adicionados Tavily, Exa ou Serper. A integração Brave foi preservada.
-- Endpoints e formatos de `Search`, `SearchDetail` e `Lead` permanecem compatíveis.
-- O ZIP de entrega contém código e documentação, sem `.env` real, credenciais,
-  ambiente virtual, `node_modules`, caches ou artefatos de build.
+## Validações executadas
 
-Após publicar o patch, uma pesquisa real pode ser acompanhada no Render pelo
-UUID para confirmar a conectividade do ambiente de produção e o failover.
+Python 3.12.13. Dependências de `backend/requirements.local.txt` disponíveis em
+ambiente virtual isolado.
+
+| Comando/verificação | Resultado |
+| --- | --- |
+| `pytest -q` em `backend/` | Passou, código de saída 0. |
+| `pytest -q -o addopts=''` em `backend/` | **140 passed, 1 skipped, 4 warnings** — nenhum teste falhou. |
+| `pytest -q -o addopts='' tests/test_overpass.py tests/test_check_overpass.py` | **67 passed, 4 warnings**. |
+| Ruff nos módulos e testes da coleta/diagnóstico | Passou. |
+| Sintaxe YAML e estrutura do workflow | Válidas; eventos, paths, Python, diretório e comandos conferidos. |
+| `python -m scripts.check_overpass --help` | Passou, sem chamadas de rede. |
+| Comparação do frontend com o ZIP recebido | Todos os arquivos idênticos. |
+
+O `-o addopts=''` apenas remove a opção `-q` duplicada de `pytest.ini` para
+mostrar os totais; não seleciona nem ignora testes. O único teste ignorado é o
+smoke opcional de MongoDB, que exige `RUN_MONGODB_INTEGRATION=1` e um serviço
+configurado. Os quatro warnings são as deprecações preexistentes de
+`FastAPI.on_event`, mantidas visíveis.
+
+Os 67 testes de coleta e diagnóstico cobrem, entre outros, `ReadTimeout →`
+segundo endpoint com sucesso, `ReadTimeout → HTTP 503 →` terceiro endpoint com
+sucesso, e `ReadTimeout → HTTP 503 → ConnectError →` 503 amigável com resumo das
+três falhas. Todos usam mocks. O diagnóstico real não foi executado nesta sessão.
+Não foram repetidos builds do frontend, pois nenhum de seus arquivos mudou.
+
+## CI
+
+Criado `.github/workflows/backend-tests.yml`, que executa:
+
+- em pushes para `correcao` com mudanças em `backend/**` ou no próprio workflow;
+- em pull requests que alterem `backend/**` ou o workflow.
+
+O job faz checkout, configura Python 3.12, instala `requirements.local.txt` e
+executa `pytest -q` dentro de `backend/`. Uma falha de teste falha o job, sem
+`continue-on-error`. A integração opcional MongoDB fica desativada. O diagnóstico
+real não é chamado no CI.
+
+O workflow foi validado localmente, mas ainda não executado no GitHub. Ele não
+configura sozinho uma trava de deploy no Render: checks obrigatórios e a política
+de deploy devem ser configurados no serviço/repositório, se desejado.
+
+## Diagnóstico manual no Render Shell
+
+Com a raiz do serviço definida como `backend/`:
+
+```bash
+python -m scripts.check_overpass
+```
+
+Se o shell abrir na raiz do repositório, execute primeiro `cd backend`.
+O script consulta no máximo um elemento OSM por endpoint, individualmente e
+sem repetir, mesmo quando um endpoint anterior funciona. Usa os mesmos
+endpoints, User-Agent e timeouts HTTPX da aplicação. Não importa o pipeline,
+não exige credenciais MongoDB e não modifica banco de dados. Exibe status,
+resultado e tempo aproximado. Código de saída: 0 se todos responderem com JSON
+válido; 1 se qualquer endpoint falhar. Execute sob demanda, fora do CI.
+
+## Configuração importante no Render
+
+Se `OVERPASS_ENDPOINTS` já estiver definida, ela sobrescreve o novo pool padrão.
+Após publicar o código, atualize-a manualmente para:
+
+```env
+OVERPASS_ENDPOINTS=https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter,https://overpass-api.de/api/interpreter
+```
+
+Ou remova essa variável para usar os defaults. Nenhuma variável real foi
+alterada ou incluída na entrega. O ZIP não inclui `.env` real, ambiente virtual,
+`node_modules`, caches ou artefatos de build.

@@ -1348,7 +1348,7 @@ def test_brave_search_uses_brazilian_localization(
         "secret-test-key"
     )
     assert request.url.params["country"] == "BR"
-    assert request.url.params["search_lang"] == "pt"
+    assert request.url.params["search_lang"] == "pt-br"
     assert request.url.params["ui_lang"] == "pt-BR"
     assert request.url.params["count"] == "5"
     assert "Clínica OdontoMais" in request.url.params["q"]

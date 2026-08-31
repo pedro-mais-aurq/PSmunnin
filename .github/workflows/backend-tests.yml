@@ -1,0 +1,43 @@
+name: Backend tests
+
+on:
+  push:
+    branches:
+      - correcao
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      MONGO_URL: mongodb://localhost:27017
+      DB_NAME: psmunnin_test
+      RUN_MONGODB_INTEGRATION: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements.local.txt
+      - name: Install backend test dependencies
+        run: python -m pip install -r requirements.local.txt
+      - name: Run backend tests (mocked HTTP)
+        run: pytest -q
